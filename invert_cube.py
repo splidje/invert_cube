@@ -142,22 +142,25 @@ for b in range(size):
                 rgb2 = numpy.add(numpy.multiply(v3, mult), p4)
                 # draw a line from point 3 on face 1 to this new point
                 p3 = face1[2]
-                v2 = numpy.subtract(rgb2, p3)
-                # get where it hits plane of face made with point 4 and points 1 and 2 on face 1 - get distance from point 3 as proportion of distance to this even newer point
-                if tuple(v2) == (0, 0, 0):
+                if tuple(map(round, rgb2)) == tuple(p3):
                     rgb1 = p3
                     move2 = 1
                 else:
+                    v2 = numpy.subtract(rgb2, p3)
+                    # get where it hits plane of face made with point 4 and points 1 and 2 on face 1 - get distance from point 3 as proportion of distance to this even newer point
                     face2 = face1[:2] + (p4,)
                     norm2 = tris[face2]
                     norm2 = numpy.true_divide(norm2, numpy.linalg.norm(norm2))
                     face2d = numpy.dot(face2[0], norm2)
                     mult = (face2d - numpy.dot(p3, norm2)) / numpy.dot(v2, norm2)
-                    if mult < 0.9999 or numpy.isinf(mult):
+                    if mult < 0.9999:
                         #print "fucked2!", v2, norm2, mult
                         rgb1 = p3
                         move2 = 1
                         #sys.exit(-1)
+                    elif numpy.isinf(mult):
+                        print "inf", face2, norm2, face2d, p3, rgb2, v2, tuple(map(round, rgb2)), tuple(p3), tuple(map(round, rgb2)) == tuple(p3)
+                        sys.exit(-1)
                     else:
                         move2 = 1 - 1 / mult # proporitional distance from edge
                         rgb1 = numpy.add(numpy.multiply(v2, mult), p3)
@@ -171,7 +174,11 @@ for b in range(size):
                 v1 = numpy.subtract(face1[1], face1[0])
                 v2 = numpy.subtract(face1[2], face1[0])
                 norm1 = numpy.cross(v1, v2)
-                norm1 = numpy.true_divide(norm1, numpy.linalg.norm(norm1))
+                norm1d = numpy.linalg.norm(norm1)
+                if not numpy.isfinite(norm1d):
+                    print norm1, norm1d, v1, v2
+                    sys.exit(-1)
+                norm1 = numpy.true_divide(norm1, norm1d)
                 face1d = numpy.dot(face1[0], norm1)
                 p1, p2 = face1[:2]
                 v1 = numpy.subtract(p2, p1)
