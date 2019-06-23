@@ -36,6 +36,17 @@ for r, gbs in inverse_map.iteritems():
             val = tuple(sum(x)/len(x) for x in zip(*vals))
             inverse_map[r][g][b] = val
 
+# set up ocio
+import PyOpenColorIO as ocio
+conf = ocio.Config()
+conf.addColorSpace(ocio.ColorSpace('ref'))
+ft = ocio.FileTransform(in_path)
+ft.setInterpolation('tetrahedral')
+cs = ocio.ColorSpace('test')
+cs.setTransform(ft, ocio.Constants.COLORSPACE_DIR_FROM_REFERENCE)
+conf.addColorSpace(cs)
+proc = conf.getProcessor('ref', 'test')
+
 out_file = open(out_path, "w")
 
 out_file.write("LUT_3D_SIZE {}\n".format(size))
@@ -122,10 +133,37 @@ for b in range(size):
                 
                 # found tetra!
 
+                rgb = r,g,b
+
+                val = None
+
+                # generate pixels in this range
+                ranges = [(mn/float(size-1), (mx-mn)/float((size-1)**2)) for mn, mx in ((min(x), max(x)) for x in zip(*tetra))]
+                pixels = []
+                for bb in (i * ranges[2][1] + ranges[2][0] for i in range(size)):
+                    for gg in (i * ranges[1][1] + ranges[1][0] for i in range(size)):
+                        for rr in (i * ranges[0][1] + ranges[0][0] for i in range(size)):
+                            pixels.extend((rr, gg, bb))
+                #print pixels[:60]
+                inv_pixels = proc.applyRGB(pixels)
+                #print inv_pixels[:60]
+                for i in range(0, len(inv_pixels), 3):
+                    rrggbb = [int(round(x*(size-1))) for x in inv_pixels[i:i+3]]
+                    print rrggbb, rgb
+                    if (rrggbb == rgb):
+                        print "found!"
+                        val = pixels[i:i+3]
+
+                if val is None:
+                    print "not found :-("
+                    #val = (0,0,0)
+                    sys.exit(-1)
+                
+                """
                 # get mapped tetra
                 inv_tetra = tuple(inverse_map[rr][gg][bb] for rr, gg, bb in tetra)
                 
-                rgb = r,g,b
+
                 face1 = tetra[:3]
                 norm1 = tris[face1]
                 norm1 = numpy.true_divide(norm1, numpy.linalg.norm(norm1))
@@ -193,6 +231,7 @@ for b in range(size):
                 rgb3 = numpy.add(rgb2, numpy.multiply(v3, move3))
 
                 val = rgb3
+                """
                 
             R, G, B = tuple((x / float(size-1)) for x in val)
             out_file.write("{} {} {}\n".format(R, G, B))
