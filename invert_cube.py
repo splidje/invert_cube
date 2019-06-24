@@ -138,26 +138,27 @@ for b in range(size):
                 val = None
 
                 # generate pixels in this range
-                ranges = [(mn/float(size-1), (mx-mn)/float((size-1)**2)) for mn, mx in ((min(x), max(x)) for x in zip(*tetra))]
+                ranges = [(min(x), max(x)-min(x)) for x in zip(*tetra)]
                 pixels = []
-                for bb in (i * ranges[2][1] + ranges[2][0] for i in range(size)):
-                    for gg in (i * ranges[1][1] + ranges[1][0] for i in range(size)):
-                        for rr in (i * ranges[0][1] + ranges[0][0] for i in range(size)):
+                for k in range(size):
+                    for j in range(size):
+                        for i in range(size):
+                            rr = (i * ranges[0][1]/float(size-1) + ranges[0][0]) / (size-1)
+                            gg = (j * ranges[1][1]/float(size-1) + ranges[1][0]) / (size-1)
+                            bb = (k * ranges[2][1]/float(size-1) + ranges[2][0]) / (size-1)
                             pixels.extend((rr, gg, bb))
-                #print pixels[:60]
                 inv_pixels = proc.applyRGB(pixels)
-                #print inv_pixels[:60]
                 for i in range(0, len(inv_pixels), 3):
-                    rrggbb = [int(round(x*(size-1))) for x in inv_pixels[i:i+3]]
-                    print rrggbb, rgb
+                    rrggbb = tuple(int(round(x*(size-1))) for x in inv_pixels[i:i+3])
                     if (rrggbb == rgb):
                         print "found!"
                         val = pixels[i:i+3]
+                        break
 
                 if val is None:
                     print "not found :-("
-                    #val = (0,0,0)
-                    sys.exit(-1)
+                    val = (0,0,0)
+                    #sys.exit(-1)
                 
                 """
                 # get mapped tetra
