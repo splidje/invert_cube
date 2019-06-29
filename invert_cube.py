@@ -230,7 +230,11 @@ for gap in gaps:
     # didn't find tetra?
     else:
         # closest point
-        RGB = sorted((numpy.linalg.norm(numpy.subtract(cnd, gap)), cnd) for cnd in cnds)[0][1]
+        srted = sorted((numpy.linalg.norm(numpy.subtract(cnd, gap)), cnd) for cnd in cnds)
+        if not srted:
+            srted = sorted((numpy.linalg.norm(numpy.subtract(cnd, gap)), cnd) for cnd in pnts)
+        RGB = srted[0][1]
+        # TODO: if nothing in this cell, search around the neighbours            
         # map
         rgb = tuple(numpy.mean(x) for x in zip(*inv_val_map[RGB]))
 
