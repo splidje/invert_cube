@@ -1,240 +1,260 @@
+#!/usr/bin/env python
+import os
 import sys
 import re
-import numpy
 from collections import defaultdict
-
-in_path = sys.argv[1]
-out_path = sys.argv[2]
-
-in_file = open(in_path)
-
-size = None
-while size is None:
-    line = in_file.readline()
-    match = re.match(r"\s*LUT_3D_SIZE\s+(\d+)", line)
-    if match:
-        size = int(match.group(1))
-
-inverse_map = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
-
-for b in range(size):
-    for g in range(size):
-        for r in range(size):
-            R = None
-            while R is None:
-                line = in_file.readline()
-                match = re.match(r"\s*([+-.\d]+)\s+([+-.\d]+)\s+([+-.\d]+)", line)
-                if match:
-                    R, G, B = tuple(int(float(x) * (size-1)) for x in match.groups())
-            inverse_map[R][G][B].append((r, g, b))
-in_file.close()
-
-# average
-for r, gbs in inverse_map.iteritems():
-    for g, bs in gbs.iteritems():
-        for b, vals in bs.iteritems():
-            val = tuple(sum(x)/len(x) for x in zip(*vals))
-            inverse_map[r][g][b] = val
-
-# set up ocio
 import PyOpenColorIO as ocio
+import numpy
+import time
+import itertools
+import subprocess
+
+in_cube_path = sys.argv[1]
+out_cube_path = sys.argv[2]
+
 conf = ocio.Config()
 conf.addColorSpace(ocio.ColorSpace('ref'))
-ft = ocio.FileTransform(in_path)
+ft = ocio.FileTransform(in_cube_path)
 ft.setInterpolation('tetrahedral')
 cs = ocio.ColorSpace('test')
 cs.setTransform(ft, ocio.Constants.COLORSPACE_DIR_FROM_REFERENCE)
 conf.addColorSpace(cs)
 proc = conf.getProcessor('ref', 'test')
 
-out_file = open(out_path, "w")
+# get cube size
+in_cube_f = open(in_cube_path)
+size = None
+while size is None:
+    line = in_cube_f.readline()
+    match = re.match(r"^\s*LUT_3D_SIZE\s+(\d+)", line)
+    if match:
+        size = int(match.group(1))
+in_cube_f.close()
 
-out_file.write("LUT_3D_SIZE {}\n".format(size))
+# == FUNCTIONS ==
+def transform_range(ranges, precision):
+    pixels = []
+    sizes = [(mx - mn) for mn, mx in ranges]
+    for b in range(precision):
+        for g in range(precision):
+            for r in range(precision):
+                pixels.extend((
+                    (x * sizes[i]) / float(precision-1) + ranges[i][0]
+                    for i, x in enumerate((r, g, b))
+                ))
+    trans_pix = proc.applyRGB(pixels)
+    ret = []
+    for i in range(0, len(trans_pix), 3):
+        ret.append((tuple(pixels[i:i+3]), tuple(trans_pix[i:i+3])))
+    return ret
 
-tris = {}
+# == MAIN STUFF ==
 
-for b in range(size):
-    for g in range(size):
-        for r in range(size):
-            R = G = B = 0
-            val = inverse_map[r][g][b]
-            if len(val) == 0:
-               
-                # INTERPOLATION!!
-                
-                # find a tetrahedron we're in
-                minmaxs = ((x, x) for x in (r, g, b))
-                points = []
-                tetras = set()
-                tetra = None
-                while not tetra:
-                    # expand
-                    minmaxs = tuple(
-                        (
-                            (mn - 1 if mn > 0 else mn),
-                            (mx + 1 if mx < (size-1) else mx),
-                        ) for mn, mx in minmaxs
-                    )
-                    # add points
-                    for rr in minmaxs[0]:
-                        for gg in minmaxs[1]:
-                            for bb in minmaxs[2]:
-                                if len(inverse_map[rr][gg][bb]) > 0:
-                                    points.append((rr, gg, bb))
-                    points = list(set(points))
-                    # find all tetras
-                    for i, p1 in enumerate(points):
-                        for j, p2 in enumerate(points[i+1:]):
-                            for k, p3 in enumerate(points[i+j+2:]):
-                                for l, p4 in enumerate(points[i+j+k+3:]):
-                                    key = tuple(sorted((p1, p2, p3, p4)))
-                                    if key not in tetras:
-                                        # middle
-                                        cntr = [sum(p)/float(len(p)) for p in zip(*key)]
-                                        # establish faces
-                                        faces = []
-                                        for ii, t1 in enumerate(key):
-                                            for jj, t2 in enumerate(key[ii+1:]):
-                                                for kk, t3 in enumerate(key[ii+jj+2:]):
-                                                    faces.append(tuple(sorted((t1, t2, t3))))
-                                        # right side of each face?
-                                        inside = True
-                                        for face in faces:
-                                            # plane eq
-                                            if face not in tris:
-                                                # get normal
-                                                v1 = numpy.subtract(face[1], face[0])
-                                                v2 = numpy.subtract(face[2], face[0])
-                                                tris[face] = numpy.cross(v1, v2)
-                                            norm = tris[face]
-                                            # which side centre?
-                                            cdist = numpy.dot(numpy.subtract(cntr, face[0]), norm)
-                                            if cdist == 0:
-                                                inside = False
-                                                break
-                                            else:
-                                                # which side us?
-                                                dist = numpy.dot(numpy.subtract((r, g, b), face[0]), norm)
-                                                if cdist < 0 and dist > 0 or cdist > 0 and dist < 0:
-                                                    inside = False
-                                                    break
-                                        if inside:
-                                            tetra = key
-                                            break
-                                        tetras.add(key)
-                                    if tetra:
-                                        break
-                                if tetra:
-                                    break
-                            if tetra:
-                                break
-                        if tetra:
-                            break
-                
-                # found tetra!
+st = time.time()
 
-                rgb = r,g,b
+# do first transform
+val_table = transform_range([(0, 1)] * 3, size)
 
-                val = None
+# get output min and maxes
+ranges = [(min(x), max(x)) for x in zip(*(d for s, d in val_table))]
+#ranges = [(0, 1)] * 3
 
-                # generate pixels in this range
-                ranges = [(min(x), max(x)-min(x)) for x in zip(*tetra)]
-                pixels = []
-                for k in range(size):
-                    for j in range(size):
-                        for i in range(size):
-                            rr = (i * ranges[0][1]/float(size-1) + ranges[0][0]) / (size-1)
-                            gg = (j * ranges[1][1]/float(size-1) + ranges[1][0]) / (size-1)
-                            bb = (k * ranges[2][1]/float(size-1) + ranges[2][0]) / (size-1)
-                            pixels.extend((rr, gg, bb))
-                inv_pixels = proc.applyRGB(pixels)
-                for i in range(0, len(inv_pixels), 3):
-                    rrggbb = tuple(int(round(x*(size-1))) for x in inv_pixels[i:i+3])
-                    if (rrggbb == rgb):
-                        print "found!"
-                        val = pixels[i:i+3]
-                        break
+# TODO: flip this float table, and collect lists of multiple destinations
+inv_val_map = defaultdict(list)
+for s, d in val_table:
+    inv_val_map[d].append(s)
+# TODO: connect up smallest unique tetras source side
 
-                if val is None:
-                    print "not found :-("
-                    val = (0,0,0)
-                    #sys.exit(-1)
-                
-                """
-                # get mapped tetra
-                inv_tetra = tuple(inverse_map[rr][gg][bb] for rr, gg, bb in tetra)
-                
+pnts = inv_val_map.keys()
 
-                face1 = tetra[:3]
-                norm1 = tris[face1]
-                norm1 = numpy.true_divide(norm1, numpy.linalg.norm(norm1))
-                face1d = numpy.dot(face1[0], norm1)
-                p4 = tetra[3]
-                # draw a line from point 4 (not on face 1) to our point
-                v3 = numpy.subtract(rgb, p4)
-                # get where it hits opposite plane (face 1) - get distance from point 4 as proportion of distance to new point
-                mult = (face1d - numpy.dot(p4, norm1)) / numpy.dot(v3, norm1)
-                if mult < 0.99999:
-                    print "fucked1!", mult
-                    sys.exit(-1)
-                move3 = 1 - 1 / mult # proportional distance from face
-                rgb2 = numpy.add(numpy.multiply(v3, mult), p4)
-                # draw a line from point 3 on face 1 to this new point
-                p3 = face1[2]
-                if tuple(map(round, rgb2)) == tuple(p3):
-                    rgb1 = p3
-                    move2 = 1
-                else:
-                    v2 = numpy.subtract(rgb2, p3)
-                    # get where it hits plane of face made with point 4 and points 1 and 2 on face 1 - get distance from point 3 as proportion of distance to this even newer point
-                    face2 = face1[:2] + (p4,)
-                    norm2 = tris[face2]
-                    norm2 = numpy.true_divide(norm2, numpy.linalg.norm(norm2))
-                    face2d = numpy.dot(face2[0], norm2)
-                    mult = (face2d - numpy.dot(p3, norm2)) / numpy.dot(v2, norm2)
-                    if mult < 0.9999:
-                        #print "fucked2!", v2, norm2, mult
-                        rgb1 = p3
-                        move2 = 1
-                        #sys.exit(-1)
-                    elif numpy.isinf(mult):
-                        print "inf", face2, norm2, face2d, p3, rgb2, v2, tuple(map(round, rgb2)), tuple(p3), tuple(map(round, rgb2)) == tuple(p3)
-                        sys.exit(-1)
-                    else:
-                        move2 = 1 - 1 / mult # proporitional distance from edge
-                        rgb1 = numpy.add(numpy.multiply(v2, mult), p3)
-                # get distance from this even newer point to point 1 on face 1 - as a proportion of distance to point 2 from point 1
-                move1 = numpy.linalg.norm(numpy.subtract(rgb1, face1[0])) / numpy.linalg.norm(numpy.subtract(face1[1], face1[0]))
+# write out points
+path_prefix = os.path.splitext(out_cube_path)[0]
+nodes_path = "{}.node".format(path_prefix)
+node_f = open(nodes_path, "w")
+node_f.write("{} 3 0 0\n".format(len(pnts)))
+for i, d in enumerate(pnts):
+    node_f.write("{} {}\n".format(i + 1, " ".join(map(str, d))))
+node_f.close()
+# run tetgen
+os.system(subprocess.list2cmdline(('tetgen', '-M', nodes_path)))
+# read in tetras
+tetras_path = "{}.1.ele".format(path_prefix)
+tetras_f = open(tetras_path)
+num_tetras = int(re.search(r"^\s*(\d+)", tetras_f.readline()).group(1))
+tetras = tuple(tuple(map(int, re.findall(r"\d+", tetras_f.readline())[1:5])) for i in range(num_tetras))
+tetras_f.close()
 
-                # follow these three moves on the inverse tetra
-                # move from p1 on f1 towards p2
-                face1 = inv_tetra[:3]
-                # get normal
-                v1 = numpy.subtract(face1[1], face1[0])
-                v2 = numpy.subtract(face1[2], face1[0])
-                norm1 = numpy.cross(v1, v2)
-                norm1d = numpy.linalg.norm(norm1)
-                if not numpy.isfinite(norm1d):
-                    print norm1, norm1d, v1, v2
-                    sys.exit(-1)
-                norm1 = numpy.true_divide(norm1, norm1d)
-                face1d = numpy.dot(face1[0], norm1)
-                p1, p2 = face1[:2]
-                v1 = numpy.subtract(p2, p1)
-                rgb1 = numpy.add(p1, numpy.multiply(v1, move1))
-                # move from rgb1 to p3 on f1
-                p3 = face1[2]
-                v2 = numpy.subtract(p3, rgb1)
-                rgb2 = numpy.add(rgb1, numpy.multiply(v2, move2))
-                # move from rgb2 to p4 on tetra
-                p4 = inv_tetra[3]
-                v3 = numpy.subtract(p4, rgb2)
-                rgb3 = numpy.add(rgb2, numpy.multiply(v3, move3))
+print time.time() - st
 
-                val = rgb3
-                """
-                
-            R, G, B = tuple((x / float(size-1)) for x in val)
-            out_file.write("{} {} {}\n".format(R, G, B))
-out_file.close()
+# TODO: scale up and round dests to find gaps
+inv_map_scaled = defaultdict(list)
+for d in pnts:
+    inv_map_scaled[tuple(
+        int(round((size-1) * (x - r[0]) / (r[1] - r[0])))
+        for x, r in zip(d, ranges)
+    )].extend(inv_val_map[d])
+# aggregate
+for RGB, ss in inv_map_scaled.items():
+    inv_map_scaled[RGB] = [numpy.mean(x) for x in zip(*ss)]
+        #sorted(ss)[0]
+        #ss[0] if len(ss) == 1 else (1, 0.5, 0.5)
+
+# IDEA: DO EVERYTHING WITH TETRAHEDRONS!! AHAHAHAHAHAHA! USE THE SAME PRINCIPLE FOR EVERY SINGLE M.F. POINT WE WANT TO MAP!
+
+gaps = []
+for R in range(size):
+    for G in range(size):
+        for B in range(size):
+            RGB = R, G, B
+            #if not inv_map_scaled[RGB]
+            gaps.append(tuple(r[0] + (r[1] - r[0]) * x / float(size-1) for x, r in zip(RGB, ranges)))
+
+print time.time() - st
+
+def in_tetra(tetra_dets, p1):
+    for face0, nrm, pdpos in tetra_dets:
+        p1d = numpy.dot(nrm, numpy.subtract(p1, face0))
+        if p1d != 0 and (p1d > 0) != pdpos:
+            return False
+    return True
+
+tetra_cache = {}
+
+def get_tetra_dets(idx):
+    if idx not in tetra_cache:
+        tetra = tuple(pnts[i-1] for i in tetras[idx])
+        tetra_cache[idx] = tetra, []
+        for i in range(4):
+            face = [tetra[j] for j in range(4) if j != i]
+            nrm = numpy.cross(numpy.subtract(face[1], face[0]), numpy.subtract(face[2], face[0]))
+            pdpos = numpy.dot(nrm, numpy.subtract(tetra[i], face[0])) > 0
+            tetra_cache[idx][1].append((face[0], nrm, pdpos))
+    return tetra_cache[idx]
+
+def calc_sphere(tetra):
+    coeffs = []
+    Tdet = numpy.linalg.det([tetra[i] + (1,) for i in range(4)])
+    ts = []
+    t = [-numpy.dot(tetra[i], tetra[i]) for i in range(4)]
+    for i in range(4):
+        M = [
+            [t[j] if k == i else (tetra[j][k] if k < 3 else 1) for k in range(4)]
+            for j in range(4)
+        ]
+        coeffs.append(numpy.linalg.det(M) / Tdet)
+    centre = [-x/2 for x in coeffs[:3]]
+    radius = numpy.sqrt(numpy.dot(coeffs[:3], coeffs[:3]) - 4*coeffs[3]) / 2
+    return centre, radius
+
+tetra_zones = defaultdict(list)
+for idx in range(len(tetras)):
+    tetra = tuple(pnts[i-1] for i in tetras[idx])
+    # range of grid cells points are in
+    gr = [(min(x), max(x) + 1) for x in zip(*((int((size-1) * (x - r[0]) / (r[1] - r[0])) for x, r in zip(p, ranges)) for p in tetra))]
+    for r in range(*gr[0]):
+        for g in range(*gr[1]):
+            for b in range(*gr[2]):
+                tetra_zones[(r, g, b)].append(idx)
+
+# TODO: find the tetras each (unscaled float) gap is in:
+for gap in gaps:
+    inside_tetra = None
+    # which grid bit?
+    gcell = tuple(int((size-1) * (x - r[0]) / (r[1] - r[0])) for x, r in zip(gap, ranges))
+    # which tetra?
+    cnds = set()
+    for tetra_idx in tetra_zones[gcell]:
+        tetra, tetra_dets = get_tetra_dets(tetra_idx)
+        # add points to candidates for later
+        cnds.update(tetra)
+        is_in = in_tetra(tetra_dets, gap)
+        if is_in:
+            inside_tetra = tetra, tetra_dets
+            break
+    # found tetra?
+    if inside_tetra:
+        tetra, tetra_dets = inside_tetra
+
+        # git distance from point 4
+        v3 = numpy.subtract(gap, tetra[3])
+        face4_dets = tetra_dets[3]
+        nrm = face4_dets[1]
+        f4d = numpy.dot(nrm, numpy.subtract(face4_dets[0], tetra[3]))
+        v3d = numpy.dot(nrm, v3)
+        move3 = (v3d / f4d)
+        if move3 != 0:
+            p2 = numpy.add(tetra[3], numpy.true_divide(v3, move3))
+        else:
+            p2 = tetra[2]
+        move3 = 1 - move3 # reverse move is rest of the way
+        # distance from point3
+        v2 = numpy.subtract(p2, tetra[2])
+        face3_dets = tetra_dets[2]
+        nrm = face3_dets[1]
+        f3d = numpy.dot(nrm, numpy.subtract(face3_dets[0], tetra[2]))
+        v2d = numpy.dot(nrm, v2)
+        move2 = (v2d / f3d)
+        if move2 != 0:
+            p1 = numpy.add(tetra[2], numpy.true_divide(v2, move2))
+        else:
+            p1 = tetra[0]
+        move2 = 1 - move2
+        # distance from point1
+        move1 = numpy.linalg.norm(numpy.subtract(p1, tetra[0])) / numpy.linalg.norm(numpy.subtract(tetra[1], tetra[0]))
+
+        # map tetra
+        # TODO: should really pick smallest
+        min_rad = None
+        for p1 in inv_val_map[tetra[0]]:
+            for p2 in inv_val_map[tetra[1]]:
+                for p3 in inv_val_map[tetra[2]]:
+                    for p4 in inv_val_map[tetra[3]]:
+                        tet = (p1, p2, p3, p4)
+                        cntr, radius = calc_sphere(tet)
+                        if min_rad is None or radius < min_rad:
+                            min_rad = radius
+                            tetra_src = tet
+
+        # do the moves
+        p1 = numpy.add(tetra_src[0], numpy.multiply(numpy.subtract(tetra_src[1], tetra_src[0]), move1))
+        p2 = numpy.add(p1, numpy.multiply(numpy.subtract(tetra_src[2], p1), move2))
+        p3 = numpy.add(p2, numpy.multiply(numpy.subtract(tetra_src[3], p2), move3))
+        
+        rgb = p3
+
+        #rgb = [numpy.mean(x) for x in zip(*tetra_src_pnts)]
+
+        # TODO:     work out weights for each vertex (sum of vertices / 2 is midpoint, sum of 0.5 * each vertex is same, weight per vertex describes everywhere within tetra?)
+        # TODO:     every combination of possible mapping vertices forms a tetra. find smallest
+        # TODO:     apply the weights to that smallest tetra to get coords
+    # didn't find tetra?
+    else:
+        # closest point
+        RGB = sorted((numpy.linalg.norm(numpy.subtract(cnd, gap)), cnd) for cnd in cnds)[0][1]
+        # map
+        rgb = tuple(numpy.mean(x) for x in zip(*inv_val_map[RGB]))
+
+    inv_map_scaled[
+        tuple(
+            int(round((size-1) * (x - r[0]) / (r[1] - r[0])))
+            for x, r in zip(gap, ranges)
+        )
+    ] = rgb
+
+print time.time() - st
+
+# write out
+out_cube_f = open(out_cube_path, "w")
+out_cube_f.write("LUT_3D_SIZE {}\n".format(size))
+out_cube_f.write("DOMAIN_MIN {}\n".format(" ".join(str(r[0]) for r in ranges)))
+out_cube_f.write("DOMAIN_MAX {}\n".format(" ".join(str(r[1]) for r in ranges)))
+for B in range(size):
+    for G in range(size):
+        for R in range(size):
+            RGB = (R, G, B)
+            rgb = inv_map_scaled[RGB]
+            #if not rgb:
+            #    rgb = (0, 0, 0)
+            out_cube_f.write("{}\n".format(" ".join(map(str, rgb))))
+out_cube_f.close()
 
